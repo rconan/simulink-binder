@@ -4,8 +4,6 @@ use proc_macro::TokenStream;
 use proc_macro2::{Ident, Span};
 use quote::quote;
 use regex::Regex;
-use std::env;
-use std::fs::File;
 use std::io::{BufRead, BufReader, Cursor};
 use syn::parse::{Parse, ParseStream};
 use syn::{parse_macro_input, Result};
@@ -15,15 +13,15 @@ struct Args {
     // the name of the Simulink model
     model: syn::Ident,
     // the path to the Simulink C model header file
-    header_path: syn::LitStr,
+    header: syn::LitStr,
 }
 impl Parse for Args {
     // inputs argument parser
     fn parse(input: ParseStream) -> Result<Self> {
         let model = input.parse()?;
         input.parse::<syn::Token![,]>()?;
-        let header_path = input.parse()?;
-        Ok(Self { model, header_path })
+        let header = input.parse()?;
+        Ok(Self { model, header })
     }
 }
 // Simulink inputs/outputs
@@ -55,11 +53,11 @@ impl IO {
     }
 }
 // Parse the Simulink C header file to extract inputs and outputs variables
-fn parse_io(lines: &mut std::io::Lines<BufReader<File>>, io: &str) -> Option<Vec<IO>> {
+fn parse_io(lines: &mut std::io::Lines<BufReader<Cursor<String>>>, io: &str) -> Option<Vec<IO>> {
     let re = Regex::new(r"_T (?P<name>\w+)\[(?P<size>\d+)\]").unwrap();
     match lines.next() {
         Some(Ok(line)) if line.starts_with("typedef struct") => {
-            println!("{}:", io);
+            println!("| {}:", io);
             let mut io_data = vec![];
             while let Some(Ok(line)) = lines.next() {
                 if line.contains(io) {
@@ -69,7 +67,7 @@ fn parse_io(lines: &mut std::io::Lines<BufReader<File>>, io: &str) -> Option<Vec
                     let rs_type_name = &caps["name"].replace("_", "");
                     let rs_var_name = &caps["name"].to_lowercase();
                     println!(
-                        " - {:<10}: {:>6} => ({:>10} : {:<8})",
+                        "|  - {:<10}: {:>6} => ({:>10} : {:<8})",
                         &caps["name"], &caps["size"], rs_var_name, rs_type_name
                     );
                     io_data.push(IO::new(&caps["name"], &caps["size"]))
@@ -90,18 +88,9 @@ fn parse_io(lines: &mut std::io::Lines<BufReader<File>>, io: &str) -> Option<Vec
 ///```
 #[proc_macro]
 pub fn import(input: TokenStream) -> TokenStream {
-    println!("Dir: {:?}", std::env::current_dir());
-    println!("Path: {:?}", std::module_path!());
-    let Args { model, header_path } = parse_macro_input!(input);
-    println!("header: {}", header_path.value());
-
-    println!("File: {}", file!());
-    //let header = include_str!("M1HPloadcells.h");
-    //println!("{}", header);
-
-    let header_file = format!("{}/{}.h", header_path.value(), model);
-    println!("Simulink header file: {}", header_file);
-    let file = File::open(header_file).unwrap();
+    let Args { model, header } = parse_macro_input!(input);
+    println!("Parsing Simulink model {}:", model);
+    let file = Cursor::new(header.value());
     let reader = BufReader::new(file);
     let mut lines = reader.lines();
 
