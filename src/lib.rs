@@ -244,6 +244,13 @@ pub fn import(input: TokenStream) -> TokenStream {
                 Some(())
             }
         }
+    impl<'a> Controller<'a> {
+        pub fn dispatch(pipe: &mut U<'a>, data: &[f64]) {
+        data.iter().enumerate().for_each(|(k, &v)| {
+            pipe[k] = v;
+        });
+        }
+    }
     };
     code.into()
 }
