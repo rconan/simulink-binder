@@ -54,7 +54,8 @@ impl IO {
 }
 // Parse the Simulink C header file to extract inputs and outputs variables
 fn parse_io(lines: &mut std::io::Lines<BufReader<Cursor<String>>>, io: &str) -> Option<Vec<IO>> {
-    let re = Regex::new(r"_T (?P<name>\w+)\[(?P<size>\d+)\]").unwrap();
+    let re_with_size = Regex::new(r"_T (?P<name>\w+)\[(?P<size>\d+)\]").unwrap();
+    let re_without_size = Regex::new(r"_T (?P<name>\w+)").unwrap();
     match lines.next() {
         Some(Ok(line)) if line.starts_with("typedef struct") => {
             println!("| {}:", io);
@@ -63,14 +64,25 @@ fn parse_io(lines: &mut std::io::Lines<BufReader<Cursor<String>>>, io: &str) -> 
                 if line.contains(io) {
                     break;
                 } else {
-                    let caps = re.captures(&line).unwrap();
-                    let rs_type_name = &caps["name"].replace("_", "");
-                    let rs_var_name = &caps["name"].to_lowercase();
-                    println!(
-                        "|  - {:<10}: {:>6} => ({:>10} : {:<8})",
-                        &caps["name"], &caps["size"], rs_var_name, rs_type_name
-                    );
-                    io_data.push(IO::new(&caps["name"], &caps["size"]))
+                    if let Some(caps) = re_with_size.captures(&line) {
+                        let rs_type_name = &caps["name"].replace("_", "");
+                        let rs_var_name = &caps["name"].to_lowercase();
+                        println!(
+                            "|  - {:<10}: {:>6} => ({:>10} : {:<8})",
+                            &caps["name"], &caps["size"], rs_var_name, rs_type_name
+                        );
+                        io_data.push(IO::new(&caps["name"], &caps["size"]))
+                    } else {
+                        if let Some(caps) = re_without_size.captures(&line) {
+                            let rs_type_name = &caps["name"].replace("_", "");
+                            let rs_var_name = &caps["name"].to_lowercase();
+                            println!(
+                                "|  - {:<10}: {:>6} => ({:>10} : {:<8})",
+                                &caps["name"], "1", rs_var_name, rs_type_name
+                            );
+                            io_data.push(IO::new(&caps["name"], "1"))
+                        }
+                    }
                 }
             }
             Some(io_data)
