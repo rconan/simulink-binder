@@ -1,6 +1,6 @@
 [package]
 name = "simulink-binder"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2018"
 license = "MIT"
 description = "Simulink C to Rust binder"
@@ -11,7 +11,6 @@ documentation = "https://docs.rs/simulink-binder"
 proc-macro = true
 
 [dependencies]
-license = "2.0.1"
 paste = "1.0.5"
 proc-macro2 = "1.0.28"
 quote = "1.0.9"
