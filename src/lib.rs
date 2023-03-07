@@ -4,7 +4,10 @@ use proc_macro::TokenStream;
 use proc_macro2::{Ident, Span};
 use quote::quote;
 use regex::Regex;
-use std::io::{BufRead, BufReader, Cursor};
+use std::env;
+use std::fs::File;
+use std::io::{BufRead, BufReader};
+use std::path::Path;
 use syn::parse::{Parse, ParseStream};
 use syn::{parse_macro_input, Result};
 
@@ -13,49 +16,64 @@ struct Args {
     // the name of the Simulink model
     model: syn::Ident,
     // the path to the Simulink C model header file
-    header: syn::LitStr,
+    // header: syn::LitStr,
 }
 impl Parse for Args {
     // inputs argument parser
     fn parse(input: ParseStream) -> Result<Self> {
         let model = input.parse()?;
-        input.parse::<syn::Token![,]>()?;
-        let header = input.parse()?;
-        Ok(Self { model, header })
+        // input.parse::<syn::Token![,]>()?;
+        // let header = input.parse()?;
+        Ok(Self { model })
     }
 }
 // Simulink inputs/outputs
-#[derive(Debug)]
+#[derive(Debug, Default)]
 struct IO {
     // i/o variable name
     pub name: String,
-    // i/o variable identifier
-    pub ident: Ident,
     // i/o variable size
-    pub size: usize,
+    pub size: Option<usize>,
 }
 impl IO {
     // Creates a new IO
-    fn new(name: &str, size: &str) -> Self {
+    fn new(name: &str, size: Option<&str>) -> Self {
         Self {
             name: name.to_string(),
-            ident: Ident::new(name, Span::call_site()),
-            size: size.parse().unwrap(),
+            size: size.and_then(|s| s.parse().ok()),
         }
-    }
-    // Rust enum variant
-    fn variant(&self) -> Ident {
-        Ident::new(&self.name.replace("_", ""), Span::call_site())
     }
     // Rust variable
     fn var(&self) -> Ident {
-        Ident::new(&self.name.to_lowercase(), Span::call_site())
+        Ident::new(&self.name, Span::call_site())
     }
 }
+#[derive(Debug, Default)]
+struct List(Vec<IO>);
+impl List {
+    fn quote(&self) -> proc_macro2::TokenStream {
+        self.0
+            .iter()
+            .fold(proc_macro2::TokenStream::default(), |t, io| {
+                let var = io.var();
+                if let Some(size) = io.size {
+                    quote! {
+                        #t
+                        #var: [0f64;#size],
+                    }
+                } else {
+                    quote! {
+                        #t
+                        #var: 0f64,
+                    }
+                }
+            })
+    }
+}
+
 // Parse the Simulink C header file to extract inputs and outputs variables
-fn parse_io(lines: &mut std::io::Lines<BufReader<Cursor<String>>>, io: &str) -> Option<Vec<IO>> {
-    let re_with_size = Regex::new(r"_T (?P<name>\w+)\[(?P<size>\d+)\]").unwrap();
-    let re_without_size = Regex::new(r"_T (?P<name>\w+)").unwrap();
+fn parse_io(lines: &mut std::io::Lines<BufReader<File>>, io: &str) -> Option<List> {
+    let re = Regex::new(r"_T (?P<name>\w+)(?:\[(?P<size>\d+)\])?").unwrap();
     match lines.next() {
         Some(Ok(line)) if line.starts_with("typedef struct") => {
             println!("| {}:", io);
@@ -64,28 +82,14 @@ fn parse_io(lines: &mut std::io::Lines<BufReader<Cursor<String>>>, io: &str) -> 
                 if line.contains(io) {
                     break;
                 } else {
-                    if let Some(caps) = re_with_size.captures(&line) {
-                        let rs_type_name = &caps["name"].replace("_", "");
-                        let rs_var_name = &caps["name"].to_lowercase();
-                        println!(
-                            "|  - {:<10}: {:>6} => ({:>10} : {:<8})",
-                            &caps["name"], &caps["size"], rs_var_name, rs_type_name
-                        );
-                        io_data.push(IO::new(&caps["name"], &caps["size"]))
-                    } else {
-                        if let Some(caps) = re_without_size.captures(&line) {
-                            let rs_type_name = &caps["name"].replace("_", "");
-                            let rs_var_name = &caps["name"].to_lowercase();
-                            println!(
-                                "|  - {:<10}: {:>6} => ({:>10} : {:<8})",
-                                &caps["name"], "1", rs_var_name, rs_type_name
-                            );
-                            io_data.push(IO::new(&caps["name"], "1"))
-                        }
+                    if let Some(caps) = re.captures(&line) {
+                        let size = caps.name("size").map(|m| m.as_str());
+                        println!("|  - {:<22}: {:>5}", &caps["name"], size.unwrap_or("1"),);
+                        io_data.push(IO::new(&caps["name"], size))
                     }
                 }
             }
-            Some(io_data)
+            Some(List(io_data))
         }
         _ => None,
     }
@@ -100,169 +104,99 @@ fn parse_io(lines: &mut std::io::Lines<BufReader<Cursor<String>>>, io: &str) -> 
 ///```
 #[proc_macro]
 pub fn import(input: TokenStream) -> TokenStream {
-    let Args { model, header } = parse_macro_input!(input);
+    let Args { model } = parse_macro_input!(input);
     println!("Parsing Simulink model {}:", model);
-    let file = Cursor::new(header.value());
+    let path = Path::new(&env::var("CARGO_MANIFEST_DIR").unwrap())
+        .join("sys")
+        .join(model.to_string())
+        .with_extension("h");
+    let file = File::open(&path).expect(&format!("file {:?} not found", path));
     let reader = BufReader::new(file);
     let mut lines = reader.lines();
 
-    let mut model_inputs = vec![];
-    let mut model_outputs = vec![];
+    let mut model_inputs = List::default();
+    let mut model_outputs = List::default();
+    let mut model_states = List::default();
     while let Some(Ok(line)) = lines.next() {
         if line.contains("External inputs") {
-            if let Some(ref mut io) = parse_io(&mut lines, "ExtU") {
-                model_inputs.append(io);
+            if let Some(io) = parse_io(&mut lines, "ExtU") {
+                model_inputs = io;
             }
         }
         if line.contains("External outputs") {
-            if let Some(ref mut io) = parse_io(&mut lines, "ExtY") {
-                model_outputs.append(io);
+            if let Some(io) = parse_io(&mut lines, "ExtY") {
+                model_outputs = io;
+            }
+        }
+        if line.contains("Block states") {
+            if let Some(io) = parse_io(&mut lines, "DW") {
+                model_states = io;
             }
         }
     }
-    let sim_u: Vec<_> = model_inputs.iter().map(|i| i.ident.clone()).collect();
-    let size_u: Vec<_> = model_inputs.iter().map(|i| i.size).collect();
-    let enum_u: Vec<_> = model_inputs.iter().map(|i| i.variant()).collect();
-    let var_u: Vec<_> = model_inputs.iter().map(|i| i.var()).collect();
-    let sim_y: Vec<_> = model_outputs.iter().map(|o| o.ident.clone()).collect();
-    let size_y: Vec<_> = model_outputs.iter().map(|o| o.size).collect();
-    let enum_y: Vec<_> = model_outputs.iter().map(|i| i.variant()).collect();
-    let var_y: Vec<_> = model_outputs.iter().map(|i| i.var()).collect();
+
+    let var_u = model_inputs.quote();
+    let var_y = model_outputs.quote();
+    let var_s = model_states.quote();
+
     let code = quote! {
-    pub trait Simulink {
-            fn initialize(&mut self);
-            fn __step__(&self);
-            fn terminate(&self);
-    }
-        paste::paste!{
-            /// Simulink external input (U)
-            #[repr(C)]
-            #[allow(non_snake_case)]
-            #[derive(Debug)]
-            struct [<ExtU_ #model _T>] {
-            #(#sim_u: [f64;#size_u]),*
-        }}
-        paste::paste!{
-            /// Simulink external output (Y)
-            #[repr(C)]
-            #[allow(non_snake_case)]
-            #[derive(Debug)]
-            struct [<ExtY_ #model _T>] {
-            #(#sim_y: [f64;#size_y]),*
-        }}
+        include!(concat!(env!("OUT_DIR"), "/bindings.rs"));
 
         paste::paste!{
-        extern "C" {
-            fn [<#model _initialize>]();
-            fn [<#model _step>]();
-            fn [<#model _terminate>]();
-            static mut [<#model _U>]: [<ExtU_ #model _T>];
-            static mut [<#model _Y>]: [<ExtY_ #model _T>];
-        }}
-        /// Controller inputs U
-        #[derive(Debug)]
-        pub enum U<'a> {
-            #(#enum_u(&'a mut [f64; #size_u])),*
+        /// Simulink controller wrapper
+        #[derive(Debug, Clone, Copy, Default)]
+        pub struct #model {
+            // Inputs Simulink structure
+            pub inputs: [<ExtU_ #model _T>],
+            // Outputs Simulink structure
+            pub outputs: [<ExtY_ #model _T>],
+            states: [<DW_ #model _T>],
         }
-        impl<'a> std::ops::Index<usize> for U<'a> {
-            type Output = f64;
-            fn index(&self, index: usize) -> &Self::Output {
-                match self {
-                    #(U::#enum_u(data) => &data[index]),*
-                }
+        impl Default for [<ExtU_ #model _T>] {
+            fn default() -> Self {
+                Self { #var_u }
             }
         }
-        impl<'a> std::ops::IndexMut<usize> for U<'a> {
-            fn index_mut(&mut self, index: usize) -> &mut Self::Output {
-                match self {
-                    #(U::#enum_u(data) => &mut data[index]),*
-                }
+        impl Default for [<ExtY_ #model _T>] {
+            fn default() -> Self {
+                Self { #var_y }
             }
         }
-        /// Controller outputs Y
-        #[derive(Debug)]
-        pub enum Y<'a> {
-            #(#enum_y(&'a mut [f64; #size_y])),*
-        }
-        impl<'a> std::ops::Index<usize> for Y<'a> {
-            type Output = f64;
-            fn index(&self, index: usize) -> &Self::Output {
-                match self {
-                    #(Y::#enum_y(data) => &data[index]),*
-                }
+        impl Default for [<DW_ #model _T>] {
+            fn default() -> Self {
+                Self { #var_s }
             }
         }
-        impl<'a> From<&Y<'a>> for Vec<f64> {
-            fn from(y: &Y<'a>) -> Vec<f64> {
-                match y {
-                    #(Y::#enum_y(data) => data.to_vec()),*
-                }
-            }
-        }
-        /// Controller
-        pub struct Controller<'a> {
-            #(pub #var_u: U<'a>,)*
-            #(pub #var_y: Y<'a>,)*
-        }
-        paste::paste!{
-        impl<'a> Controller<'a> {
+        impl #model {
             /// Creates a new controller
             pub fn new() -> Self {
-                let mut this = unsafe {
-                    Self {
-                        #(#var_u: U::#enum_u(&mut [<#model _U>].#sim_u),)*
-                        #(#var_y: Y::#enum_y(&mut [<#model _Y>].#sim_y),)*
-                    }
+                let mut this: Self = Default::default();
+                let mut data: [<RT_MODEL_ #model _T>] = [<tag_RTM_ #model _T>] {
+                    dwork: &mut this.states as *mut _,
                 };
-                this.initialize();
+                unsafe {
+                    [< #model _initialize>](
+                        &mut data as *mut _,
+                        &mut this.inputs as *mut _,
+                        &mut this.outputs as *mut _,
+                    )
+                }
                 this
             }
-        }}
-        paste::paste! {
-        impl<'a> Simulink for Controller<'a> {
-            fn initialize(&mut self) {
+            /// Steps the controller
+            pub fn step(&mut self) {
+                let mut data: [<RT_MODEL_ #model _T>] = [<tag_RTM_ #model _T>] {
+                    dwork: &mut self.states as *mut _,
+                };
                 unsafe {
-                    [<#model _initialize>]();
+                    [<#model _step>](
+                        &mut data as *mut _,
+                        &mut self.inputs as *mut _,
+                        &mut self.outputs as *mut _,
+                    )
                 }
             }
-            fn __step__(&self) {
-                unsafe {
-                    [<#model _step>]();
-                }
-            }
-            fn terminate(&self) {
-                unsafe {
-                    [<#model _terminate>]();
-                }
-            }
-        }
-        }
-        impl<'a> Drop for Controller<'a> {
-            fn drop(&mut self) {
-                self.terminate()
-            }
-        }
-        impl<'a> Iterator for &Controller<'a> {
-            type Item = ();
-            fn next(&mut self) -> Option<Self::Item> {
-                self.__step__();
-                Some(())
-            }
-        }
-        impl<'a> Iterator for Controller<'a> {
-            type Item = ();
-            fn next(&mut self) -> Option<Self::Item> {
-                self.__step__();
-                Some(())
-            }
-        }
-    impl<'a> Controller<'a> {
-        pub fn dispatch(pipe: &mut U<'a>, data: &[f64]) {
-        data.iter().enumerate().for_each(|(k, &v)| {
-            pipe[k] = v;
-        });
-        }
-    }
+        }        }
     };
     code.into()
 }
